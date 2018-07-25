@@ -1,0 +1,158 @@
+<?php
+/**
+ * Implements hook_help().
+ */
+function sb_cert_mod_postman_help($path, $arg) {
+  switch ($path) {
+    case 'sb-cert':
+      return t('This is help text for the "Post office" page.');
+  }
+}
+
+/**
+ * Implements hook_permission().
+ */
+function sb_cert_mod_postman_permission() {
+    return [
+        'access post office page' => [
+            'title' => t('Access post office page'),
+            'description' => t('Allow users to access post office page'),
+        ]
+    ];
+}
+
+/**
+ * Implements hook_menu().
+ */
+function sb_cert_mod_postman_menu() {
+    return [
+        'sb-cert' => [
+            'title' => 'Post office page',
+            'page callback' => 'drupal_get_form',
+            'page arguments' => array('sb_cert_mod_postman_form'),
+//            'page callback' => 'sb_cert_mod_postman_page',
+            'access arguments' => ['access post office page'],
+        ]
+    ];
+}
+
+function sb_cert_mod_postman_form($form, &$form_state)
+{
+    $header = [
+        t('Customer name'),
+//        t('Product name'),
+        t('SKU'),
+        t('Changed date'),
+        t('Quantity'),
+    ];
+    
+    $lines = sb_cert_mod_postman_get_list();
+    
+//    $items = commerce_line_item_load_multiple(array_keys($lines));    
+//    var_dump($items);die();
+    
+    $options = [];
+    foreach($lines as $line) {
+        $options[$line->id] = [
+            $line->username,
+//            $line->product,
+            $line->sku,
+            format_date($line->changed),
+            $line->quantity,
+        ];
+    }
+	$form['arrived'] = array(
+        '#type' => 'tableselect',
+        '#header' => $header,
+        '#options' => $options,
+        '#empty' => t('Queue is empty'),
+        '#required' => true,
+	);
+
+	$form['submit'] = array(
+		'#type'  => 'submit',
+		'#value' => t('Submit'),
+	);
+
+	return $form;
+}
+
+function sb_cert_mod_postman_form_submit($form, &$form_state)
+{
+    $arrivedArray = $form_state['values']['arrived'];
+    $lines = sb_cert_mod_postman_get_list();
+    $ordersArrived = [];
+    foreach($lines as $line) {
+        $arrived = (bool) $arrivedArray[$line->id];
+//        $current = $ordersArrived[$line->orderId] ?? true;
+        $current = isset($ordersArrived[$line->orderId]) ? $ordersArrived[$line->orderId] : true; // old php
+        $ordersArrived[$line->orderId] = ($current AND $arrived);
+    }
+    //
+    foreach($ordersArrived as $orderId=>$arrived) {
+        $order = commerce_order_load($orderId);
+        if($arrived) {
+            $status = 'arrived';
+        } else {
+            $status = 'not_arrived';
+        }
+        $result = commerce_order_status_update($order, $status);
+        if(!$result) {
+            drupal_set_message(t('Cant change status: ') . json_encode([$orderId, $status]), 'error');
+        }
+        drupal_set_message(t('Order #') .$orderId. t(' status changed to ' ) . $status);
+    }
+}
+
+function sb_cert_mod_postman_get_list()
+{
+    $select = db_select('commerce_line_item', 'line');
+    $select->join('commerce_order', 'o', 'line.order_id = o.order_id');
+    $select->join('users', 'u', 'o.uid = u.uid');
+    
+    $select->addField('line', 'line_item_id', 'id');
+    $select->addField('line', 'order_id', 'orderId');
+    $select->addField('u', 'name', 'username');
+// 3. Name of product in the line item
+    $select->addField('line', 'line_item_label', 'sku');
+    $select->addField('o', 'changed', 'changed');
+    $select->addField('line', 'quantity', 'quantity');
+    
+    $select->condition('o.status', 'pending');
+    return $select->execute()->fetchAllAssoc('id');
+}
+
+
+/**
+ * Implements hook_commerce_order_state_info().
+ */
+function sb_cert_mod_postman_commerce_order_state_info() {
+    return [
+      'arrival' => [
+            'name' => 'arrival',
+            'title' => t('Arrival'),
+            'description' => t('Orders in this state wait be arrived.'),
+            'default_status' => 'not_arrived',
+        ]
+    ];
+}
+
+/**
+ * Implements hook_commerce_order_status_info().
+ */
+function sb_cert_mod_postman_commerce_order_status_info() {
+    return [
+        'arrived' => [
+            'name' => 'arrived',
+            'title' => t('Arrived'),
+            'state' => 'arrival',
+            'cart' => FALSE,
+        ],
+        'not_arrived' => [
+            'name' => 'not_arrived',
+            'title' => t('Not Arrived'),
+            'state' => 'arrival',
+            'cart' => FALSE,
+        ],
+    ];
+}

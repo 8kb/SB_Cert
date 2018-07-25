@@ -1,0 +1,5 @@
+name = SB Cert Post office Agent
+description = SB Cert Post office Agent modules
+version = "7.x-1.0"
+package = SB Cert
+core = 7.x

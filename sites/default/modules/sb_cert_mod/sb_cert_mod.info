@@ -1,0 +1,5 @@
+name = SB Cert
+description = SB Cert modules
+version = "7.x-1.0"
+package = SB Cert
+core = 7.x
