@@ -9,9 +9,3 @@ function sb_cert_mod_postman_install() {
         user_role_grant_permissions($role->rid, ['access post office page']);
     }
 }
-
-/**
- * Implements hook_uninstall().
- */
-//function commerce_uninstall() {
-//}

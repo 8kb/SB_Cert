@@ -11,6 +11,9 @@ function sb_cert_mod_postman_help($path, $arg) {
 
 /**
  * Implements hook_permission().
+ * 
+ * I create permission, and attach it to role (see install).
+ * Its best practice for RBAC
  */
 function sb_cert_mod_postman_permission() {
     return [
@@ -23,6 +26,8 @@ function sb_cert_mod_postman_permission() {
 
 /**
  * Implements hook_menu().
+ * 
+ * Add our page
  */
 function sb_cert_mod_postman_menu() {
     return [
@@ -30,101 +35,158 @@ function sb_cert_mod_postman_menu() {
             'title' => 'Post office page',
             'page callback' => 'drupal_get_form',
             'page arguments' => array('sb_cert_mod_postman_form'),
-//            'page callback' => 'sb_cert_mod_postman_page',
             'access arguments' => ['access post office page'],
         ]
     ];
 }
 
+/**
+ * Implements hook_form().
+ * 
+ * Construct form
+ */
 function sb_cert_mod_postman_form($form, &$form_state)
 {
+    // table select
     $header = [
         t('Customer name'),
-//        t('Product name'),
+        t('Product name'),
         t('SKU'),
         t('Changed date'),
         t('Quantity'),
     ];
-    
-    $lines = sb_cert_mod_postman_get_list();
-    
-//    $items = commerce_line_item_load_multiple(array_keys($lines));    
-//    var_dump($items);die();
-    
-    $options = [];
-    foreach($lines as $line) {
-        $options[$line->id] = [
+	$form['arrived'] = array(
+        '#type' => 'tableselect',
+        '#header' => $header,
+        '#options' => sb_cert_mod_postman_getPreparedData(),
+        '#empty' => t('Queue is empty'),
+        '#required' => true,
+	);
+    // submit
+	$form['submit'] = array(
+		'#type'  => 'submit',
+		'#value' => t('Submit'),
+	);
+    //
+	return $form;
+}
+
+/**
+ * Get from DB and prepare (format) data for table_select
+ */
+function sb_cert_mod_postman_getPreparedData()
+{
+    $data = [];
+    foreach(sb_cert_mod_postman_getData() as $line) {
+        $data[$line->id] = [
             $line->username,
-//            $line->product,
+            $line->productName,
             $line->sku,
             format_date($line->changed),
             $line->quantity,
         ];
     }
-	$form['arrived'] = array(
-        '#type' => 'tableselect',
-        '#header' => $header,
-        '#options' => $options,
-        '#empty' => t('Queue is empty'),
-        '#required' => true,
-	);
-
-	$form['submit'] = array(
-		'#type'  => 'submit',
-		'#value' => t('Submit'),
-	);
-
-	return $form;
+    return $data;
 }
 
+/**
+ * Implements hook_form_submit().
+ * 
+ * Main business logic here
+ */
 function sb_cert_mod_postman_form_submit($form, &$form_state)
 {
+    global $user;
+    // get data from form
     $arrivedArray = $form_state['values']['arrived'];
-    $lines = sb_cert_mod_postman_get_list();
-    $ordersArrived = [];
-    foreach($lines as $line) {
-        $arrived = (bool) $arrivedArray[$line->id];
-//        $current = $ordersArrived[$line->orderId] ?? true;
-        $current = isset($ordersArrived[$line->orderId]) ? $ordersArrived[$line->orderId] : true; // old php
-        $ordersArrived[$line->orderId] = ($current AND $arrived);
-    }
-    //
-    foreach($ordersArrived as $orderId=>$arrived) {
-        $order = commerce_order_load($orderId);
-        if($arrived) {
+    // check if all line in order is arrived
+    $missedSKU = sb_cert_mod_postman_missedSKU($arrivedArray);
+    // Update status for each order
+    foreach($missedSKU as $orderId=>$SKUs) {
+        if(empty($SKUs)) {
             $status = 'arrived';
+            $logMsg = t('User @username has marked this order as arrived', [
+                '@username' => $user->name
+            ]);
+            sb_cert_mod_postman_updateStatus($orderId, $status, $logMsg);
         } else {
             $status = 'not_arrived';
+            $logMsg = t('User @username has marked this order as  NOT arrived. Missing SKU: @SKUs', [
+                '@username' => $user->name,
+                '@SKUs' => implode(', ', $SKUs)
+            ]);
+            sb_cert_mod_postman_updateStatus($orderId, $status, $logMsg, 'warning');
         }
-        $result = commerce_order_status_update($order, $status);
-        if(!$result) {
-            drupal_set_message(t('Cant change status: ') . json_encode([$orderId, $status]), 'error');
-        }
-        drupal_set_message(t('Order #') .$orderId. t(' status changed to ' ) . $status);
     }
 }
 
-function sb_cert_mod_postman_get_list()
+/**
+ * Update order status and show messages etc
+ */
+function sb_cert_mod_postman_updateStatus($orderId, $status, $logMsg, $msgType = 'status')
 {
-    $select = db_select('commerce_line_item', 'line');
-    $select->join('commerce_order', 'o', 'line.order_id = o.order_id');
-    $select->join('users', 'u', 'o.uid = u.uid');
-    
-    $select->addField('line', 'line_item_id', 'id');
-    $select->addField('line', 'order_id', 'orderId');
-    $select->addField('u', 'name', 'username');
-// 3. Name of product in the line item
-    $select->addField('line', 'line_item_label', 'sku');
-    $select->addField('o', 'changed', 'changed');
-    $select->addField('line', 'quantity', 'quantity');
-    
-    $select->condition('o.status', 'pending');
-    return $select->execute()->fetchAllAssoc('id');
+    $order = commerce_order_load($orderId);
+    commerce_order_status_update($order, $status, FALSE, TRUE, $logMsg);
+    drupal_set_message(t('Order #@orderId status changed to "@status"', [
+        '@orderId' => $orderId,
+        '@status' => $status
+    ]), $msgType);
+}
+
+/**
+ * Prepare list of missed SKU in each order
+ * if list is empty - order is arrived
+ * return array with (key == order_id) and (value == missedSKUarray)
+ */
+function sb_cert_mod_postman_missedSKU($lineArrived)
+{
+    $missedSKU = [];
+    // check all line from DB
+    foreach(sb_cert_mod_postman_getData() as $line) {
+        // if this line is first in order - init missed array
+        if(!isset($missedSKU[$line->orderId])) {
+            $missedSKU[$line->orderId] = [];
+        }
+        //
+        $lineIsArrived = (bool) $lineArrived[$line->id]; // 0 == false, other == true
+        if(!$lineIsArrived) {
+            $missedSKU[$line->orderId][] = $line->sku;
+        }
+    }
+    return $missedSKU;
 }
 
 
 /**
+ * Get lines data from DB
+ */
+function sb_cert_mod_postman_getData()
+{
+    // tables and relations
+    $select = db_select('commerce_line_item', 'line');
+    $select->join('commerce_order', 'o', 'line.order_id = o.order_id');
+    $select->join('users', 'u', 'o.uid = u.uid');
+    $select->join('commerce_product', 'product', 'line.line_item_label = product.sku');
+    // fields
+    $select->addField('line', 'line_item_id', 'id'); // id (line id, for form) 
+    $select->addField('line', 'order_id', 'orderId'); // orderId (id of order, for form_submit)
+    $select->addField('u', 'name', 'username'); // username
+    $select->addField('product', 'title', 'productName'); // productName (name of product)
+    $select->addField('line', 'line_item_label', 'sku'); // SKU
+    $select->addField('o', 'changed', 'changed'); // changed (timestamp of ORDER change)
+    $select->addField('line', 'quantity', 'quantity'); // quantity
+    // conditions
+    $select->condition('o.status', 'pending');
+    // id as key, for form_submit
+    return $select->execute()->fetchAllAssoc('id');
+}
+
+/**
  * Implements hook_commerce_order_state_info().
+ * 
+ * I add new state because it figurate in task,
+ * but postman cant update status for "not arrived" order
+ * maybe need use pending?
  */
 function sb_cert_mod_postman_commerce_order_state_info() {
     return [
@@ -139,19 +201,21 @@ function sb_cert_mod_postman_commerce_order_state_info() {
 
 /**
  * Implements hook_commerce_order_status_info().
+ * 
+ * Add new statuses.
  */
 function sb_cert_mod_postman_commerce_order_status_info() {
     return [
         'arrived' => [
             'name' => 'arrived',
             'title' => t('Arrived'),
-            'state' => 'arrival',
+            'state' => 'arrival', // maybe pending?
             'cart' => FALSE,
         ],
         'not_arrived' => [
             'name' => 'not_arrived',
             'title' => t('Not Arrived'),
-            'state' => 'arrival',
+            'state' => 'arrival', // maybe pending?
             'cart' => FALSE,
         ],
     ];
